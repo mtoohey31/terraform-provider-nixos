@@ -26,6 +26,8 @@ import (
 
 // TODO: write tests: https://developer.hashicorp.com/terraform/tutorials/providers-plugin-framework/providers-plugin-framework-acceptance-testing
 
+// TODO: replace uses of time.Now to set last_updated with stats
+
 // TODO: improve error message when user doesn't have permission to switch
 // system profile
 
