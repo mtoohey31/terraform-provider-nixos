@@ -26,8 +26,6 @@ import (
 
 // TODO: write tests: https://developer.hashicorp.com/terraform/tutorials/providers-plugin-framework/providers-plugin-framework-acceptance-testing
 
-// TODO: replace uses of time.Now to set last_updated with stats
-
 // TODO: improve error message when user doesn't have permission to switch
 // system profile
 
@@ -293,6 +291,28 @@ func (m hostResourceModel) copyAndActivate(client *ssh.Client, diagnostics *diag
 	return true
 }
 
+// statCurrentProfileSymlink runs stat -c %Y /run/current-system on the remote
+// host and returns the mtime output and true if successful. If errors are
+// encountered, they will be added to diagnostics and false is returned.
+func statCurrentProfileSymlink(client *ssh.Client, diagnostics *diag.Diagnostics) (mtime time.Time, ok bool) {
+	session := createSession(client, diagnostics)
+	if session == nil {
+		return time.Time{}, false
+	}
+
+	statOutput, err := output(session, "stat -c %Y "+currentProfileSymlinkPath)
+	if reportErrorWithTitle(err, "Failed to Stat System Profile Path", diagnostics) {
+		return time.Time{}, false
+	}
+
+	epoch, err := strconv.ParseInt(strings.TrimSuffix(string(statOutput), "\n"), 10, 64)
+	if reportErrorWithTitle(err, "Failed to Parse Stat Output As Epoch Timestamp Integer", diagnostics) {
+		return time.Time{}, false
+	}
+
+	return time.Unix(epoch, 0), ok
+}
+
 // Create creates the resource and sets the initial Terraform state.
 func (nixOSHostResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	// TODO: maybe support infecting non-nixos hosts, if the user explicitly
@@ -319,7 +339,13 @@ func (nixOSHostResource) Create(ctx context.Context, req resource.CreateRequest,
 	if !plan.copyAndActivate(client, &resp.Diagnostics) {
 		return
 	}
-	plan.LastUpdated = types.StringValue(time.Now().Format(time.RFC850))
+
+	// Read last updated
+	mtime, ok := statCurrentProfileSymlink(client, &resp.Diagnostics)
+	if !ok {
+		return
+	}
+	plan.LastUpdated = types.StringValue(mtime.Format(time.RFC850))
 
 	// Set state to fully populated data
 	resp.Diagnostics.Append(resp.State.Set(ctx, plan)...)
@@ -437,21 +463,12 @@ func (nixOSHostResource) Read(ctx context.Context, req resource.ReadRequest, res
 		state.FlakeRef = types.StringNull()
 	}
 
-	// Read last_updated
-	session = createSession(client, &resp.Diagnostics)
-	if session == nil {
+	// Read last updated
+	mtime, ok := statCurrentProfileSymlink(client, &resp.Diagnostics)
+	if !ok {
 		return
 	}
-	statOutput, err := output(session, "stat -c %Y "+currentProfileSymlinkPath)
-	if reportErrorWithTitle(err, "Failed to Stat System Profile Path", &resp.Diagnostics) {
-		return
-	}
-	epoch, err := strconv.ParseInt(strings.TrimSuffix(string(statOutput), "\n"), 10, 64)
-	if reportErrorWithTitle(err, "Failed to Parse Stat Output As Epoch Timestamp Integer", &resp.Diagnostics) {
-		return
-	}
-
-	state.LastUpdated = types.StringValue(time.Unix(epoch, 0).Format(time.RFC850))
+	state.LastUpdated = types.StringValue(mtime.Format(time.RFC850))
 
 	// Set refreshed state
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -544,7 +561,13 @@ func (nixOSHostResource) Update(ctx context.Context, req resource.UpdateRequest,
 	if !plan.copyAndActivate(client, &resp.Diagnostics) {
 		return
 	}
-	plan.LastUpdated = types.StringValue(time.Now().Format(time.RFC850))
+
+	// Read last updated
+	mtime, ok := statCurrentProfileSymlink(client, &resp.Diagnostics)
+	if !ok {
+		return
+	}
+	plan.LastUpdated = types.StringValue(mtime.Format(time.RFC850))
 
 	// Set modified state
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
