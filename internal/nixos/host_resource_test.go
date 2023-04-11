@@ -5,6 +5,8 @@
 package nixos
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -13,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +23,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 	"mtoohey.com/terraform-provider-nixos/internal/testutils/sshtest"
 )
 
@@ -299,6 +303,132 @@ resource "nixos_host" "test" {
 				},
 				Config: providerConfig,
 				Check:  testCheckGCRootDir(nil),
+			},
+		},
+	})
+}
+
+func TestNixOSHostResource_validateConfig(t *testing.T) {
+	// Create and move to tempdir for duration of test
+
+	tempDir := t.TempDir()
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	// Set up keys
+
+	pubEd, privEd, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	pub, err := ssh.NewPublicKey(pubEd)
+	require.NoError(t, err)
+
+	pubString := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(pub)))
+
+	privBytes, err := x509.MarshalPKCS8PrivateKey(privEd)
+	require.NoError(t, err)
+
+	err = os.WriteFile("client-priv", pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: privBytes,
+	}), 0o600)
+	require.NoError(t, err)
+
+	err = os.WriteFile("client-priv-empty", nil, 0o600)
+	require.NoError(t, err)
+
+	resource.Test(t, resource.TestCase{
+		IsUnitTest:               true,
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			// Invalid Host
+			{
+				Config: providerConfig + fmt.Sprintf(`
+resource "nixos_host" "test" {
+  flake_ref        = "path/to/test/flake#test.flake.attr"
+  username         = "test-username"
+  host             = "***"
+  public_key       = "%s"
+  private_key_path = "client-priv"
+}`, pubString),
+				ExpectError: regexp.MustCompile(`(?s)Invalid Host.*Host is not a valid IP address or hostname`),
+			},
+			// Invalid Port, negative
+			{
+				Config: providerConfig + fmt.Sprintf(`
+resource "nixos_host" "test" {
+  flake_ref        = "path/to/test/flake#test.flake.attr"
+  username         = "test-username"
+  host             = "test-host"
+  port             = -1
+  public_key       = "%s"
+  private_key_path = "client-priv"
+}`, pubString),
+				ExpectError: regexp.MustCompile(`(?s)Port Too Small.*Port was <= 0, expected positive, unsigned, 16-bit integer`),
+			},
+			// Invalid Port, positive, too large
+			{
+				Config: providerConfig + fmt.Sprintf(`
+resource "nixos_host" "test" {
+  flake_ref        = "path/to/test/flake#test.flake.attr"
+  username         = "test-username"
+  host             = "test-host"
+  port             = 65536
+  public_key       = "%s"
+  private_key_path = "client-priv"
+}`, pubString),
+				ExpectError: regexp.MustCompile(`(?s)Port Too Large.*Port was > 65535, expected positive, unsigned, 16-bit integer`),
+			},
+			// Invalid PublicKey, not parseable
+			{
+				Config: providerConfig + `
+resource "nixos_host" "test" {
+  flake_ref        = "path/to/test/flake#test.flake.attr"
+  username         = "test-username"
+  host             = "test-host"
+  public_key       = "***"
+  private_key_path = "client-priv"
+}`,
+				ExpectError: regexp.MustCompile(`(?s)Could Not Parse SSH Public Key.*ssh: no key found`),
+			},
+			// Invalid PublicKey, multiple entries
+			{
+				Config: providerConfig + fmt.Sprintf(`
+resource "nixos_host" "test" {
+  flake_ref        = "path/to/test/flake#test.flake.attr"
+  username         = "test-username"
+  host             = "test-host"
+  public_key       = "%s\n%[1]s"
+  private_key_path = "client-priv"
+}`, pubString),
+				ExpectError: regexp.MustCompile(`(?s)SSH Public Key Contained More Than One Entry.*SSH public key should only contain a single entry, but it contained more than.*one`),
+			},
+			// Invalid PrivateKeyFile, missing
+			{
+				Config: providerConfig + fmt.Sprintf(`
+resource "nixos_host" "test" {
+  flake_ref        = "path/to/test/flake#test.flake.attr"
+  username         = "test-username"
+  host             = "test-host"
+  public_key       = "%s"
+  private_key_path = "bogus"
+}`, pubString),
+				ExpectError: regexp.MustCompile(`(?s)Could Not Read SSH Private Key.*open bogus: no such file or directory`),
+			},
+			// Invalid PrivateKeyFile, parse fails
+			{
+				Config: providerConfig + fmt.Sprintf(`
+resource "nixos_host" "test" {
+  flake_ref        = "path/to/test/flake#test.flake.attr"
+  username         = "test-username"
+  host             = "test-host"
+  public_key       = "%s"
+  private_key_path = "client-priv-empty"
+}`, pubString),
+				ExpectError: regexp.MustCompile(`(?s)Could Not Parse SSH Private Key.*ssh: no key found`),
 			},
 		},
 	})

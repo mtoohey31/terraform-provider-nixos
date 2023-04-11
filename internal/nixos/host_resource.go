@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/asaskevich/govalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -30,16 +32,16 @@ import (
 // TODO: how can we avoid requiring privileged users and stuff and not using
 // sudo on the remote host when it's not necessary
 
-// TODO: use config validators to validate formats of string config entries
-// up-front where possible
-
 const (
 	gcRootDir                 = ".terraform-provider-nixos"
 	currentProfileSymlinkPath = "/run/current-system"
 )
 
 // Ensure the implementation satisfies the expected interfaces.
-var _ resource.ResourceWithModifyPlan = nixOSHostResource{}
+var (
+	_ resource.ResourceWithModifyPlan     = nixOSHostResource{}
+	_ resource.ResourceWithValidateConfig = nixOSHostResource{}
+)
 
 // NewNixOSHostResource is a helper function to simplify the provider
 // implementation.
@@ -114,6 +116,66 @@ func (nixOSHostResource) Schema(_ context.Context, _ resource.SchemaRequest, res
 	}
 }
 
+// parsePublicKey parses publicKey, which should be in authorized_hosts format.
+// If errors are encountered, they will be added to diagnostics and nil will
+// be returned.
+func parsePublicKey(publicKey string, diagnostics *diag.Diagnostics) ssh.PublicKey {
+	pub, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(publicKey))
+	if reportErrorWithTitle(err, "Could Not Parse SSH Public Key", diagnostics) {
+		return nil
+	}
+	if len(rest) > 0 {
+		diagnostics.AddError(
+			"SSH Public Key Contained More Than One Entry",
+			"SSH public key should only contain a single entry, but it contained more than one",
+		)
+		return nil
+	}
+	return pub
+}
+
+// parsePrivateKey parses the file at privateKeyPath, which should be in PEM
+// format. If errors are encountered, they will be added to diagnostics and nil
+// will be returned.
+func parsePrivateKey(privateKeyPath string, diagnostics *diag.Diagnostics) ssh.Signer {
+	buf, err := os.ReadFile(privateKeyPath)
+	if reportErrorWithTitle(err, "Could Not Read SSH Private Key", diagnostics) {
+		return nil
+	}
+
+	priv, err := ssh.ParsePrivateKey(buf)
+	if reportErrorWithTitle(err, "Could Not Parse SSH Private Key", diagnostics) {
+		return nil
+	}
+	return priv
+}
+
+// ValidateConfig performs custom config validation.
+func (nixOSHostResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	// Retrieve values from config
+	var config hostResourceModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	if !govalidator.IsHost(config.Host.ValueString()) {
+		resp.Diagnostics.AddError("Invalid Host", "Host is not a valid IP address or hostname")
+	}
+
+	if !config.Port.IsNull() {
+		port := config.Port.ValueInt64()
+		if port <= 0 {
+			resp.Diagnostics.AddError("Port Too Small", "Port was <= 0, expected positive, unsigned, 16-bit integer")
+		} else if port > math.MaxUint16 {
+			resp.Diagnostics.AddError("Port Too Large", "Port was > 65535, expected positive, unsigned, 16-bit integer")
+		}
+	}
+
+	parsePublicKey(config.PublicKey.ValueString(), &resp.Diagnostics)
+	parsePrivateKey(config.PrivateKeyPath.ValueString(), &resp.Diagnostics)
+}
+
 // hostResourceModel maps the resource schema data.
 type hostResourceModel struct {
 	// Computed state
@@ -139,25 +201,13 @@ type hostResourceModel struct {
 // model. If an error is encountered, it will be added to diagnostics and nil
 // will be returned.
 func (m hostResourceModel) sshClient(diagnostics *diag.Diagnostics) *ssh.Client {
-	buf, err := os.ReadFile(m.PrivateKeyPath.ValueString())
-	if reportErrorWithTitle(err, "Could Not Read SSH Private Key", diagnostics) {
+	pub := parsePublicKey(m.PublicKey.ValueString(), diagnostics)
+	if pub == nil {
 		return nil
 	}
 
-	priv, err := ssh.ParsePrivateKey(buf)
-	if reportErrorWithTitle(err, "Could Not Parse SSH Private Key", diagnostics) {
-		return nil
-	}
-
-	pub, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(m.PublicKey.ValueString()))
-	if reportErrorWithTitle(err, "Could Not Parse SSH Public Key", diagnostics) {
-		return nil
-	}
-	if len(rest) > 0 {
-		diagnostics.AddError(
-			"SSH Public Key Contained More Than One Entry",
-			"SSH public key should only contain a single entry, but it contained more than one.",
-		)
+	priv := parsePrivateKey(m.PrivateKeyPath.ValueString(), diagnostics)
+	if priv == nil {
 		return nil
 	}
 
