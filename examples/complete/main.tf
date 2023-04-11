@@ -2,7 +2,7 @@ terraform {
   required_providers {
     nixos = {
       source  = "mtoohey.com/nix/nixos"
-      version = "0.1.0"
+      version = "0.1.1"
     }
   }
 }

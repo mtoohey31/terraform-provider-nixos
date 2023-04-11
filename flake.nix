@@ -13,6 +13,10 @@
         version = builtins.readFile version/version.txt;
         src = ./.;
         vendorSha256 = null;
+        nativeBuildInputs = [ final.terraform ];
+        preCheck = ''
+          go generate ./internal/nixos
+        '';
       };
     };
   } // utils.lib.eachDefaultSystem (system: with import nixpkgs

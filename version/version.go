@@ -1,8 +1,6 @@
 package version
 
-import (
-	_ "embed"
-)
+import _ "embed"
 
 // Version is the current version of this program.
 //

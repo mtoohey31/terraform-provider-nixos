@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	"mtoohey.com/terraform-provider-nixos/nixos"
+	"mtoohey.com/terraform-provider-nixos/internal/nixos"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 )
