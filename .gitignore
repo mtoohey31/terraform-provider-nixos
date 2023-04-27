@@ -1,5 +1,6 @@
 *.test
-*.out
+coverage.html
+coverage.out
 
 /result
 /terraform-provider-nixos
