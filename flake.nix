@@ -11,7 +11,7 @@
       terraform-provider-nixos = final.buildGoModule {
         pname = "terraform-provider-nixos";
         version = builtins.readFile version/version.txt;
-        src = ./.;
+        src = builtins.path { path = ./.; name = "terraform-provider-nixos-src"; };
         vendorSha256 = null;
         nativeBuildInputs = [ final.terraform ];
         preCheck = ''
