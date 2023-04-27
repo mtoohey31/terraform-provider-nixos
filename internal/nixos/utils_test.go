@@ -1,8 +1,14 @@
 package nixos
 
-import "testing"
+import (
+	"os"
+	"testing"
 
-func Test_nixOSRebuildFlakeRef(t *testing.T) {
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestNixOSRebuildFlakeRef(t *testing.T) {
 	tests := []struct {
 		flakeRef, host string
 		expected       string
@@ -40,4 +46,28 @@ func Test_nixOSRebuildFlakeRef(t *testing.T) {
 			t.Errorf("expected %s, got: %s", test.expected, actual)
 		}
 	}
+}
+
+func TestReportErrorWithTitle(t *testing.T) {
+	assert.False(t, reportErrorWithTitle(nil, "", nil))
+
+	actualDiagnostics := diag.Diagnostics{}
+	assert.True(t, reportErrorWithTitle(assert.AnError, "Test Error Title", &actualDiagnostics))
+
+	expectedDiagnostics := diag.Diagnostics{}
+	expectedDiagnostics.AddError("Test Error Title", assert.AnError.Error())
+	assert.Equal(t, expectedDiagnostics, actualDiagnostics)
+}
+
+func TestReportNotErrorIsWithTitle(t *testing.T) {
+	assert.False(t, reportNotErrorIsWithTitle(nil, nil, "", nil))
+
+	assert.False(t, reportNotErrorIsWithTitle(os.ErrNotExist, os.ErrNotExist, "", nil))
+
+	actualDiagnostics := diag.Diagnostics{}
+	assert.True(t, reportNotErrorIsWithTitle(assert.AnError, os.ErrNotExist, "Test Error Title", &actualDiagnostics))
+
+	expectedDiagnostics := diag.Diagnostics{}
+	expectedDiagnostics.AddError("Test Error Title", assert.AnError.Error())
+	assert.Equal(t, expectedDiagnostics, actualDiagnostics)
 }

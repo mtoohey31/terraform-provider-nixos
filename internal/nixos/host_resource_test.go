@@ -16,16 +16,22 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/ssh"
 	"mtoohey.com/terraform-provider-nixos/internal/testutils/sshtest"
 )
+
+// TODO: test connection parameter changes
 
 func testCheckSSHExecRequests(server *sshtest.Server, expected []string) resource.TestCheckFunc {
 	return func(*terraform.State) error {
@@ -113,34 +119,37 @@ func TestNixOSHostResource(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run tests
-	resource.Test(t, resource.TestCase{
-		IsUnitTest:               true,
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			// Create and Read testing
-			{
-				PreConfig: func() {
-					t.Setenv("PATH", strings.Join([]string{
-						filepath.Dir(terraformPath),
-						filepath.Join(oldWd, "testdata", "bin1"),
-					}, string(os.PathListSeparator)))
+	tests := []struct {
+		description string
+		steps       []resource.TestStep
+	}{
+		{
+			description: "happy path",
+			steps: []resource.TestStep{
+				// Create and Read testing
+				{
+					PreConfig: func() {
+						t.Setenv("PATH", strings.Join([]string{
+							filepath.Dir(terraformPath),
+							filepath.Join(oldWd, "testdata", "bin1"),
+						}, string(os.PathListSeparator)))
 
-					ts.Reset(map[string][]sshtest.Response{
-						"cat /etc/machine-id": {
-							{Stdout: []byte("test-machine-id\n")},
-							{Stdout: []byte("test-machine-id\n")},
-							{Stdout: []byte("test-machine-id\n")},
-						},
-						"/nix/store/test-profile-path/bin/switch-to-configuration switch":            {{}},
-						"nix-env -p /nix/var/nix/profiles/system --set /nix/store/test-profile-path": {{}},
-						"stat -c %Y /run/current-system": {
-							{Stdout: []byte("135123512\n")},
-							{Stdout: []byte("135123512\n")},
-						},
-						"realpath /run/current-system": {{Stdout: []byte("/nix/store/test-profile-path\n")}},
-					})
-				},
-				Config: providerConfig + fmt.Sprintf(`
+						ts.Reset(map[string][]sshtest.Response{
+							"cat /etc/machine-id": {
+								{Stdout: []byte("test-machine-id\n")},
+								{Stdout: []byte("test-machine-id\n")},
+								{Stdout: []byte("test-machine-id\n")},
+							},
+							"/nix/store/test-profile-path/bin/switch-to-configuration switch":            {{}},
+							"nix-env -p /nix/var/nix/profiles/system --set /nix/store/test-profile-path": {{}},
+							"stat -c %Y /run/current-system": {
+								{Stdout: []byte("135123512\n")},
+								{Stdout: []byte("135123512\n")},
+							},
+							"realpath /run/current-system": {{Stdout: []byte("/nix/store/test-profile-path\n")}},
+						})
+					},
+					Config: providerConfig + fmt.Sprintf(`
 resource "nixos_host" "test" {
   flake_ref        = "path/to/test/flake#test.flake.attr"
   username         = "test-username"
@@ -150,55 +159,55 @@ resource "nixos_host" "test" {
   private_key_path = "client-priv"
 }
 `, serverHost, serverPort, ts.PublicKeyString()),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("nixos_host.test", "id", "test-machine-id"),
-					resource.TestCheckResourceAttr("nixos_host.test", "last_updated", time.Unix(135123512, 0).Format(time.RFC850)),
-					resource.TestCheckResourceAttr("nixos_host.test", "profile_path", "/nix/store/test-profile-path"),
+					Check: resource.ComposeAggregateTestCheckFunc(
+						resource.TestCheckResourceAttr("nixos_host.test", "id", "test-machine-id"),
+						resource.TestCheckResourceAttr("nixos_host.test", "last_updated", time.Unix(135123512, 0).Format(time.RFC850)),
+						resource.TestCheckResourceAttr("nixos_host.test", "profile_path", "/nix/store/test-profile-path"),
 
-					resource.TestCheckResourceAttr("nixos_host.test", "flake_ref", "path/to/test/flake#test.flake.attr"),
+						resource.TestCheckResourceAttr("nixos_host.test", "flake_ref", "path/to/test/flake#test.flake.attr"),
 
-					resource.TestCheckResourceAttr("nixos_host.test", "username", "test-username"),
-					resource.TestCheckResourceAttr("nixos_host.test", "host", serverHost),
-					resource.TestCheckResourceAttr("nixos_host.test", "port", serverPort),
-					resource.TestCheckResourceAttr("nixos_host.test", "public_key", ts.PublicKeyString()),
-					resource.TestCheckResourceAttr("nixos_host.test", "private_key_path", "client-priv"),
+						resource.TestCheckResourceAttr("nixos_host.test", "username", "test-username"),
+						resource.TestCheckResourceAttr("nixos_host.test", "host", serverHost),
+						resource.TestCheckResourceAttr("nixos_host.test", "port", serverPort),
+						resource.TestCheckResourceAttr("nixos_host.test", "public_key", ts.PublicKeyString()),
+						resource.TestCheckResourceAttr("nixos_host.test", "private_key_path", "client-priv"),
 
-					testCheckSSHExecRequests(ts, []string{
-						"cat /etc/machine-id",
-						"cat /etc/machine-id",
-						"cat /etc/machine-id",
-						"/nix/store/test-profile-path/bin/switch-to-configuration switch",
-						"nix-env -p /nix/var/nix/profiles/system --set /nix/store/test-profile-path",
-						"stat -c %Y /run/current-system",
-					}),
-					testCheckGCRootDir(map[string]string{"test-machine-id": "/nix/store/test-profile-path"}),
-				),
-			},
-			// Update and Read: flake_ref changes
-			{
-				PreConfig: func() {
-					t.Setenv("PATH", strings.Join([]string{
-						filepath.Dir(terraformPath),
-						filepath.Join(oldWd, "testdata", "bin2"),
-					}, string(os.PathListSeparator)))
-
-					ts.Reset(map[string][]sshtest.Response{
-						"realpath /run/current-system": {
-							{Stdout: []byte("/nix/store/test-profile-path\n")},
-							// Post Check
-							{Stdout: []byte("/nix/store/other-profile-path\n")},
-						},
-						"stat -c %Y /run/current-system": {
-							{Stdout: []byte("135123512\n")},
-							{Stdout: []byte("135123513\n")},
-							// Post Check
-							{Stdout: []byte("135123513\n")},
-						},
-						"/nix/store/other-profile-path/bin/switch-to-configuration switch":            {{}},
-						"nix-env -p /nix/var/nix/profiles/system --set /nix/store/other-profile-path": {{}},
-					})
+						testCheckSSHExecRequests(ts, []string{
+							"cat /etc/machine-id",
+							"cat /etc/machine-id",
+							"cat /etc/machine-id",
+							"/nix/store/test-profile-path/bin/switch-to-configuration switch",
+							"nix-env -p /nix/var/nix/profiles/system --set /nix/store/test-profile-path",
+							"stat -c %Y /run/current-system",
+						}),
+						testCheckGCRootDir(map[string]string{"test-machine-id": "/nix/store/test-profile-path"}),
+					),
 				},
-				Config: providerConfig + fmt.Sprintf(`
+				// Update and Read: flake_ref changes
+				{
+					PreConfig: func() {
+						t.Setenv("PATH", strings.Join([]string{
+							filepath.Dir(terraformPath),
+							filepath.Join(oldWd, "testdata", "bin2"),
+						}, string(os.PathListSeparator)))
+
+						ts.Reset(map[string][]sshtest.Response{
+							"realpath /run/current-system": {
+								{Stdout: []byte("/nix/store/test-profile-path\n")},
+								// Post Check
+								{Stdout: []byte("/nix/store/other-profile-path\n")},
+							},
+							"stat -c %Y /run/current-system": {
+								{Stdout: []byte("135123512\n")},
+								{Stdout: []byte("135123513\n")},
+								// Post Check
+								{Stdout: []byte("135123513\n")},
+							},
+							"/nix/store/other-profile-path/bin/switch-to-configuration switch":            {{}},
+							"nix-env -p /nix/var/nix/profiles/system --set /nix/store/other-profile-path": {{}},
+						})
+					},
+					Config: providerConfig + fmt.Sprintf(`
 resource "nixos_host" "test" {
   flake_ref        = "path/to/other/flake#other.flake.attr"
   username         = "test-username"
@@ -208,54 +217,54 @@ resource "nixos_host" "test" {
   private_key_path = "client-priv"
 }
 `, serverHost, serverPort, ts.PublicKeyString()),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("nixos_host.test", "id", "test-machine-id"),
-					resource.TestCheckResourceAttr("nixos_host.test", "last_updated", time.Unix(135123513, 0).Format(time.RFC850)),
-					resource.TestCheckResourceAttr("nixos_host.test", "profile_path", "/nix/store/other-profile-path"),
+					Check: resource.ComposeAggregateTestCheckFunc(
+						resource.TestCheckResourceAttr("nixos_host.test", "id", "test-machine-id"),
+						resource.TestCheckResourceAttr("nixos_host.test", "last_updated", time.Unix(135123513, 0).Format(time.RFC850)),
+						resource.TestCheckResourceAttr("nixos_host.test", "profile_path", "/nix/store/other-profile-path"),
 
-					resource.TestCheckResourceAttr("nixos_host.test", "flake_ref", "path/to/other/flake#other.flake.attr"),
+						resource.TestCheckResourceAttr("nixos_host.test", "flake_ref", "path/to/other/flake#other.flake.attr"),
 
-					resource.TestCheckResourceAttr("nixos_host.test", "username", "test-username"),
-					resource.TestCheckResourceAttr("nixos_host.test", "host", serverHost),
-					resource.TestCheckResourceAttr("nixos_host.test", "port", serverPort),
-					resource.TestCheckResourceAttr("nixos_host.test", "public_key", ts.PublicKeyString()),
-					resource.TestCheckResourceAttr("nixos_host.test", "private_key_path", "client-priv"),
+						resource.TestCheckResourceAttr("nixos_host.test", "username", "test-username"),
+						resource.TestCheckResourceAttr("nixos_host.test", "host", serverHost),
+						resource.TestCheckResourceAttr("nixos_host.test", "port", serverPort),
+						resource.TestCheckResourceAttr("nixos_host.test", "public_key", ts.PublicKeyString()),
+						resource.TestCheckResourceAttr("nixos_host.test", "private_key_path", "client-priv"),
 
-					testCheckSSHExecRequests(ts, []string{
-						"realpath /run/current-system",
-						"stat -c %Y /run/current-system",
-						"/nix/store/other-profile-path/bin/switch-to-configuration switch",
-						"nix-env -p /nix/var/nix/profiles/system --set /nix/store/other-profile-path",
-						"stat -c %Y /run/current-system",
-					}),
-					testCheckGCRootDir(map[string]string{"test-machine-id": "/nix/store/other-profile-path"}),
-				),
-			},
-			// Update and Read: output path produced by flake_ref changes
-			{
-				PreConfig: func() {
-					t.Setenv("PATH", strings.Join([]string{
-						filepath.Dir(terraformPath),
-						filepath.Join(oldWd, "testdata", "bin3"),
-					}, string(os.PathListSeparator)))
-
-					ts.Reset(map[string][]sshtest.Response{
-						"realpath /run/current-system": {
-							{Stdout: []byte("/nix/store/other-profile-path\n")},
-							// Post Check
-							{Stdout: []byte("/nix/store/third-profile-path\n")},
-						},
-						"stat -c %Y /run/current-system": {
-							{Stdout: []byte("135123513\n")},
-							{Stdout: []byte("135123514\n")},
-							// Post Check
-							{Stdout: []byte("135123514\n")},
-						},
-						"/nix/store/third-profile-path/bin/switch-to-configuration switch":            {{}},
-						"nix-env -p /nix/var/nix/profiles/system --set /nix/store/third-profile-path": {{}},
-					})
+						testCheckSSHExecRequests(ts, []string{
+							"realpath /run/current-system",
+							"stat -c %Y /run/current-system",
+							"/nix/store/other-profile-path/bin/switch-to-configuration switch",
+							"nix-env -p /nix/var/nix/profiles/system --set /nix/store/other-profile-path",
+							"stat -c %Y /run/current-system",
+						}),
+						testCheckGCRootDir(map[string]string{"test-machine-id": "/nix/store/other-profile-path"}),
+					),
 				},
-				Config: providerConfig + fmt.Sprintf(`
+				// Update and Read: output path produced by flake_ref changes
+				{
+					PreConfig: func() {
+						t.Setenv("PATH", strings.Join([]string{
+							filepath.Dir(terraformPath),
+							filepath.Join(oldWd, "testdata", "bin3"),
+						}, string(os.PathListSeparator)))
+
+						ts.Reset(map[string][]sshtest.Response{
+							"realpath /run/current-system": {
+								{Stdout: []byte("/nix/store/other-profile-path\n")},
+								// Post Check
+								{Stdout: []byte("/nix/store/third-profile-path\n")},
+							},
+							"stat -c %Y /run/current-system": {
+								{Stdout: []byte("135123513\n")},
+								{Stdout: []byte("135123514\n")},
+								// Post Check
+								{Stdout: []byte("135123514\n")},
+							},
+							"/nix/store/third-profile-path/bin/switch-to-configuration switch":            {{}},
+							"nix-env -p /nix/var/nix/profiles/system --set /nix/store/third-profile-path": {{}},
+						})
+					},
+					Config: providerConfig + fmt.Sprintf(`
 resource "nixos_host" "test" {
   flake_ref        = "path/to/other/flake#other.flake.attr"
   username         = "test-username"
@@ -265,47 +274,58 @@ resource "nixos_host" "test" {
   private_key_path = "client-priv"
 }
 `, serverHost, serverPort, ts.PublicKeyString()),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("nixos_host.test", "id", "test-machine-id"),
-					resource.TestCheckResourceAttr("nixos_host.test", "last_updated", time.Unix(135123514, 0).Format(time.RFC850)),
-					resource.TestCheckResourceAttr("nixos_host.test", "profile_path", "/nix/store/third-profile-path"),
+					Check: resource.ComposeAggregateTestCheckFunc(
+						resource.TestCheckResourceAttr("nixos_host.test", "id", "test-machine-id"),
+						resource.TestCheckResourceAttr("nixos_host.test", "last_updated", time.Unix(135123514, 0).Format(time.RFC850)),
+						resource.TestCheckResourceAttr("nixos_host.test", "profile_path", "/nix/store/third-profile-path"),
 
-					resource.TestCheckResourceAttr("nixos_host.test", "flake_ref", "path/to/other/flake#other.flake.attr"),
+						resource.TestCheckResourceAttr("nixos_host.test", "flake_ref", "path/to/other/flake#other.flake.attr"),
 
-					resource.TestCheckResourceAttr("nixos_host.test", "username", "test-username"),
-					resource.TestCheckResourceAttr("nixos_host.test", "host", serverHost),
-					resource.TestCheckResourceAttr("nixos_host.test", "port", serverPort),
-					resource.TestCheckResourceAttr("nixos_host.test", "public_key", ts.PublicKeyString()),
-					resource.TestCheckResourceAttr("nixos_host.test", "private_key_path", "client-priv"),
+						resource.TestCheckResourceAttr("nixos_host.test", "username", "test-username"),
+						resource.TestCheckResourceAttr("nixos_host.test", "host", serverHost),
+						resource.TestCheckResourceAttr("nixos_host.test", "port", serverPort),
+						resource.TestCheckResourceAttr("nixos_host.test", "public_key", ts.PublicKeyString()),
+						resource.TestCheckResourceAttr("nixos_host.test", "private_key_path", "client-priv"),
 
-					testCheckSSHExecRequests(ts, []string{
-						"realpath /run/current-system",
-						"stat -c %Y /run/current-system",
-						"/nix/store/third-profile-path/bin/switch-to-configuration switch",
-						"nix-env -p /nix/var/nix/profiles/system --set /nix/store/third-profile-path",
-						"stat -c %Y /run/current-system",
-					}),
-					testCheckGCRootDir(map[string]string{"test-machine-id": "/nix/store/third-profile-path"}),
-				),
-			},
-			// Delete
-			{
-				PreConfig: func() {
-					t.Setenv("PATH", strings.Join([]string{
-						filepath.Dir(terraformPath),
-						filepath.Join(oldWd, "testdata", "bin3"),
-					}, string(os.PathListSeparator)))
-
-					ts.Reset(map[string][]sshtest.Response{
-						"realpath /run/current-system":   {{Stdout: []byte("/nix/store/other-profile-path\n")}},
-						"stat -c %Y /run/current-system": {{Stdout: []byte("135123514\n")}},
-					})
+						testCheckSSHExecRequests(ts, []string{
+							"realpath /run/current-system",
+							"stat -c %Y /run/current-system",
+							"/nix/store/third-profile-path/bin/switch-to-configuration switch",
+							"nix-env -p /nix/var/nix/profiles/system --set /nix/store/third-profile-path",
+							"stat -c %Y /run/current-system",
+						}),
+						testCheckGCRootDir(map[string]string{"test-machine-id": "/nix/store/third-profile-path"}),
+					),
 				},
-				Config: providerConfig,
-				Check:  testCheckGCRootDir(nil),
+				// Delete
+				{
+					PreConfig: func() {
+						t.Setenv("PATH", strings.Join([]string{
+							filepath.Dir(terraformPath),
+							filepath.Join(oldWd, "testdata", "bin3"),
+						}, string(os.PathListSeparator)))
+
+						ts.Reset(map[string][]sshtest.Response{
+							"realpath /run/current-system":   {{Stdout: []byte("/nix/store/other-profile-path\n")}},
+							"stat -c %Y /run/current-system": {{Stdout: []byte("135123514\n")}},
+						})
+					},
+					Config: providerConfig,
+					Check:  testCheckGCRootDir(nil),
+				},
 			},
 		},
-	})
+	}
+
+	for _, test := range tests {
+		t.Run(test.description, func(t *testing.T) {
+			resource.Test(t, resource.TestCase{
+				IsUnitTest:               true,
+				ProtoV6ProviderFactories: testProtoV6ProviderFactories,
+				Steps:                    test.steps,
+			})
+		})
+	}
 }
 
 func TestNixOSHostResource_validateConfig(t *testing.T) {
@@ -342,7 +362,7 @@ func TestNixOSHostResource_validateConfig(t *testing.T) {
 
 	resource.Test(t, resource.TestCase{
 		IsUnitTest:               true,
-		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		ProtoV6ProviderFactories: testProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			// Invalid Host
 			{
@@ -432,4 +452,123 @@ resource "nixos_host" "test" {
 			},
 		},
 	})
+}
+
+func TestHostResourceModel_sshClient(t *testing.T) {
+	type summaryDetailPair struct {
+		summary, detail string
+	}
+
+	// Create and move to tempdir for duration of test
+
+	tempDir := t.TempDir()
+
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tempDir))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(oldWd)) })
+
+	// Start ssh server
+
+	ts := sshtest.NewKeyAuthServer(t)
+
+	serverHost, serverPortString, ok := strings.Cut(ts.Addr.String(), ":")
+	require.True(t, ok)
+	serverPort, err := strconv.ParseInt(serverPortString, 10, 64)
+	require.NoError(t, err)
+
+	privBytes, err := x509.MarshalPKCS8PrivateKey(ts.ClientPrivateKey)
+	require.NoError(t, err)
+
+	err = os.WriteFile("client-priv", pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: privBytes,
+	}), 0o600)
+	require.NoError(t, err)
+
+	// Set up other keys
+
+	otherPubEd, otherPrivEd, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+
+	otherPub, err := ssh.NewPublicKey(otherPubEd)
+	require.NoError(t, err)
+
+	otherPubString := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(otherPub)))
+
+	otherPrivBytes, err := x509.MarshalPKCS8PrivateKey(otherPrivEd)
+	require.NoError(t, err)
+
+	err = os.WriteFile("other-client-priv", pem.EncodeToMemory(&pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: otherPrivBytes,
+	}), 0o600)
+	require.NoError(t, err)
+
+	tests := []struct {
+		description   string
+		model         hostResourceModel
+		expectedError *summaryDetailPair
+	}{
+		{
+			description: "happy path",
+			model: hostResourceModel{
+				Host:           types.StringValue(serverHost),
+				Port:           types.Int64Value(serverPort),
+				PublicKey:      types.StringValue(ts.PublicKeyString()),
+				PrivateKeyPath: types.StringValue("client-priv"),
+			},
+		},
+
+		{
+			description: "invalid public key",
+			model: hostResourceModel{
+				PublicKey: types.StringValue(""),
+			},
+			expectedError: &summaryDetailPair{
+				summary: "Could Not Parse SSH Public Key",
+				detail:  "ssh: no key found",
+			},
+		},
+		{
+			description: "invalid private key",
+			model: hostResourceModel{
+				PublicKey:      types.StringValue(otherPubString),
+				PrivateKeyPath: types.StringValue("non-existent"),
+			},
+			expectedError: &summaryDetailPair{
+				summary: "Could Not Read SSH Private Key",
+				detail:  "open non-existent: no such file or directory",
+			},
+		},
+		{
+			description: "key mismatch",
+			model: hostResourceModel{
+				Host:           types.StringValue(serverHost),
+				Port:           types.Int64Value(serverPort),
+				PublicKey:      types.StringValue(otherPubString),
+				PrivateKeyPath: types.StringValue("other-client-priv"),
+			},
+			expectedError: &summaryDetailPair{
+				summary: "Could Not Establish SSH Connection",
+				detail: fmt.Sprintf(
+					"ssh: handshake failed: host key mismatch, expected: %s, got: %s",
+					strings.TrimPrefix(otherPubString, "ssh-ed25519 "),
+					strings.TrimPrefix(ts.PublicKeyString(), "ssh-ed25519 "),
+				),
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.description, func(t *testing.T) {
+			var expectedDiagnostics, actualDiagnostics diag.Diagnostics
+			if test.expectedError != nil {
+				expectedDiagnostics.AddError(test.expectedError.summary, test.expectedError.detail)
+			}
+
+			assert.Equal(t, test.expectedError == nil, test.model.sshClient(&actualDiagnostics) != nil)
+			assert.Equal(t, expectedDiagnostics, actualDiagnostics)
+		})
+	}
 }

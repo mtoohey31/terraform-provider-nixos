@@ -26,6 +26,9 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+// TODO: should we be checking the machine-id to avoid continuing an existing
+// resource with a new machine?
+
 // TODO: improve error message when user doesn't have permission to switch
 // system profile
 
